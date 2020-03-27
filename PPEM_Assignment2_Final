@@ -1,0 +1,165 @@
+#####Install phyloseq#####
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("phyloseq")
+
+#####Upload necessary libraries#####
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(ade4)
+library(vegan)
+library(ape)
+
+#####assign variables, files choosen are based on varible name (taxon is the file with taxonomy in the name)#####
+taxon <- read.table(file.choose(), sep="\t", header=T, row.names=1)
+otus <- read.table(file.choose(), sep="\t", header=T, row.names=1)
+meta <- read.table(file.choose(), sep="\t", header=T, row.names=1)
+
+####Remove taxa, nothing found in archeaea and chloroplast####
+unclass <- subset(taxon, Phylum == "unclassified")
+mito <- subset(taxon, Family == "mitochondria")
+arch <- subset(taxon, Kingdom == "Archaea")
+chloro <- subset(taxon, Class == "Chloroplast")
+
+rownames(unclass)
+rownames(mito)
+rownames(arch)
+rownames(chloro)
+
+un1<-union(rownames(unclass),rownames(mito))
+un2<-union(rownames(arch),un1)
+un3<-union(rownames(chloro),un2)
+
+red.taxon <- taxon[-which(rownames(taxon) %in% un3),]
+
+####Transpose out table####
+otustran <- t(otus)
+
+####Match ESV table with the new taxonomy file####
+otusmatch <- otustran[,which(colnames(otustran) %in% rownames(red.taxon))]
+
+####remove reads with too few reads####
+few <- names(which(rowSums(otusmatch) > 5000))
+otus.re <-otusmatch[which(rownames(otusmatch) %in% few),]
+
+
+####rarefy using readout from min(rowsums())####
+min(rowSums(otus.re))
+set.seed(336)
+otus.r<-rrarefy(otus.re,5193)
+
+####COnvert OTUS to percentages####
+otusper <-otus.r/rowSums(otus.r)*100
+
+#### 1. Run PCoA analysis of entire dataset ####
+
+####Calculate Bray-Curtis distance between samples####
+otus.bray <- vegdist(otusper)
+
+####Perform PCoA analysis of BC distances####
+otus.pcoa <- cmdscale(otus.bray, k=(nrow(otusper)-1), eig=TRUE)
+
+####Store coordinates for first two axes in new variable####
+otus.p <- otus.pcoa$points[,1:2]
+
+####Calculate % variance explained by each axis####
+otus.eig <-otus.pcoa$eig
+perc.exp <-otus.eig/(sum(otus.eig))*100
+pe1 <-perc.exp[1]
+pe2 <-perc.exp[2]
+
+
+####Create Phyloseq Objects####
+otusper<-as.data.frame(otusper)
+Workshop_OTU <- otu_table(otusper, taxa_are_rows=F)
+Workshop_metadat <- sample_data(meta,errorIfNULL=TRUE)
+Workshop_taxo <- tax_table(as.matrix(red.taxon), errorIfNULL=TRUE)
+Workshop.16S <- phyloseq(Workshop_taxo, Workshop_OTU,Workshop_metadat)
+
+####Normalize number of reads####
+total = median(sample_sums(Workshop.16S))
+standf = function(x, t=total) round(t * (x / sum(x)))
+Workshop.16S = transform_sample_counts(Workshop.16S, standf)
+
+####Calculate Diversity####
+otus.div<-diversity(otusper, index="shannon")
+
+
+####Violin Plot of Alpha Diversity####
+####Assign colors and sample types####
+colors <- c("G1"= "green", "G2"= "red", "G3"="blue")
+types <- c("G1", "G2", "G3")
+labels <- c("G1"="G1", "G2"="G2", "G3"= "G3")
+
+
+Workshop.16S %>%
+  plot_richness(x="Generation", measures= c("Observed", "Shannon"))+
+  geom_violin(aes(fill=Generation, show.legend = TRUE)+
+  geom_boxplot(width=0.1)+
+  theme_classic()+
+  xlab("Generation")+
+  scale_fill_manual(values=colors)+
+  scale_x_discrete(breaks=types, labels=labels)+
+  ggtitle("Alpha Diversity")+
+  theme(plot.title=element_text(size=25, face="bold", hjust=0.5)))
+
+
+
+####Create tree####
+tree = rtree(ntaxa(Workshop.16S), rooted=TRUE, tip.label=taxa_names(Workshop.16S))
+plot(tree)
+  
+workshop16Stree <- phyloseq(Workshop_taxo, Workshop_OTU,Workshop_metadat, tree)
+workshop16Stree2 <- phyloseq(Workshop_OTU,Workshop_metadat, tree)
+
+####Tree with generation only distinguished####
+plot_tree(workshop16Stree2, color="Generation", label.tips="taxa_names",
+          ladderize="left", plot.margin = 0.3)
+
+####Tree with generation and salt vs no salt distinguished####
+plot_tree(workshop16Stree2, color="Generation", shape="Salt", label.tips="taxa_names", ladderize="right", plot.margin=0.3)
+
+####Plot Heatmap, using the label function made the y axis not legible####
+plot_heatmap(workshop16Stree2, taxa.label = "Phylum")
+#Warning message that transformation introduced infinite values in discrete y-axis#
+
+
+####Heatmap, did not work####
+Workshop.16S_abund <- filter_taxa(Workshop.16S, function(x) sum(x > total*0.20) > 0, TRUE)
+
+plot_heatmap(Workshop.16S_abund, method = "NMDS", distance = "bray")
+#Error in svd(x, nu = 0, nv = k) : infinite or missing values in 'x'#
+#In addition: Warning message: In cmdscale(dist, k = k) : only 0 of the first 2 eigenvalues are > 0#
+
+plot_heatmap(Workshop.16S_abund, method="MDS", distance="jaccard",
+             taxa.label="Genus", taxa.order="Genus", trans=NULL, low="aquamarine", high="aquamarine4", na.value = "aquamarine")
+#Only one Genus appears in graph#
+
+
+####Barplot####
+workshop_fraction <- merge_samples(Workshop.16S, "Generation")
+plot_bar(Workshop.16S, fill = "Phylum")+ 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack")
+
+plot_bar(Workshop.16S, fill="Phylum")
+
+
+
+
+####Plot Curtis-Bray####
+ordiplot(otus.pcoa,choices=c(1,2), type="none", main="PCoA of 16S rRNA gene OTUs",xlab=paste("PCoA1 (",round(pe1,2),"% variance explained)"),
+         ylab=paste("PCoA2 (",round(pe2,2),"% variance explained)"))
+####Species Scores not available####
+
+points(otus.p, col=c("black"),pch=c(21,22,23,24,25)[meta$Biomass],lwd=1,cex=5,
+       bg=c("red","blue1","gold","black","chartreuse4")[meta$Generation])
+text(otus.p,rownames(otus.p))
+legend("top",title=expression(bold("Generation")),legend=c("Generation 1","Generation 2","Generation 3"),
+       pch=15, cex=0.8,col=c("gold","blue1","red","chartreuse4","black"))
+legend(locator(1),title=expression(bold("Time")),legend=c("Initial","Three Weeks"),
+       pch=c(21,22), cex=0.8,bg="white")
+
+
+####Would not compile####
